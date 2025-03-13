@@ -251,30 +251,115 @@ def extract_text_from_word(file):
     text = "\n".join([para.text for para in doc.paragraphs])
     return text
 
-# Function to translate text
+# Improved translate_text function with better chunking strategy
 def translate_text(text, target_lang):
+    """
+    Translates text to the target language with improved chunking.
+    Handles large texts by splitting into chunks of appropriate size.
+    
+    Args:
+        text (str): Text to translate
+        target_lang (str): Target language code
+        
+    Returns:
+        str: Translated text
+    """
     # Add progress info
     progress_text = "Translating document..."
     my_bar = st.progress(0)
     
-    # For longer texts, we might need to chunk them
-    if len(text) > 5000:
-        chunks = [text[i:i+5000] for i in range(0, len(text), 5000)]
-        translated_chunks = []
-        
-        for i, chunk in enumerate(chunks):
-            translated_chunk = GoogleTranslator(source='auto', target=target_lang).translate(chunk)
-            translated_chunks.append(translated_chunk)
-            my_bar.progress((i+1)/len(chunks))
-            
+    # Check if text is empty
+    if not text or text.isspace():
         my_bar.empty()
-        return " ".join(translated_chunks)
-    else:
-        # For shorter texts
-        translated_text = GoogleTranslator(source='auto', target=target_lang).translate(text)
-        my_bar.progress(1.0)
+        return ""
+    
+    try:
+        # For longer texts, chunk them intelligently
+        if len(text) > 4500:  # Using 4500 instead of 5000 for safety margin
+            # Try to split at paragraph breaks to maintain context
+            paragraphs = text.split('\n')
+            chunks = []
+            current_chunk = ""
+            
+            for para in paragraphs:
+                # If adding this paragraph exceeds our limit, store current chunk and start a new one
+                if len(current_chunk) + len(para) > 4500:
+                    # If current paragraph itself is too long, split it at sentence boundaries
+                    if len(para) > 4500:
+                        sentences = para.replace('. ', '.|').replace('! ', '!|').replace('? ', '?|').split('|')
+                        inner_chunk = ""
+                        
+                        for sentence in sentences:
+                            if len(inner_chunk) + len(sentence) > 4500:
+                                if inner_chunk:
+                                    chunks.append(inner_chunk)
+                                
+                                # If a single sentence is too long, force-split it
+                                if len(sentence) > 4500:
+                                    # Split into fixed-size chunks, trying to split at spaces where possible
+                                    words = sentence.split(' ')
+                                    word_chunk = ""
+                                    
+                                    for word in words:
+                                        if len(word_chunk) + len(word) + 1 > 4500:
+                                            chunks.append(word_chunk)
+                                            word_chunk = word
+                                        else:
+                                            word_chunk += " " + word if word_chunk else word
+                                    
+                                    if word_chunk:
+                                        chunks.append(word_chunk)
+                                else:
+                                    chunks.append(sentence)
+                                
+                                inner_chunk = ""
+                            else:
+                                inner_chunk += " " + sentence if inner_chunk else sentence
+                        
+                        if inner_chunk:
+                            chunks.append(inner_chunk)
+                    else:
+                        # Store current chunk and start a new one with this paragraph
+                        chunks.append(current_chunk)
+                        current_chunk = para
+                else:
+                    # Add to current chunk
+                    current_chunk += "\n" + para if current_chunk else para
+            
+            # Add the last chunk if it has content
+            if current_chunk:
+                chunks.append(current_chunk)
+            
+            # Translate each chunk with proper progress tracking
+            translated_chunks = []
+            for i, chunk in enumerate(chunks):
+                try:
+                    translated_chunk = GoogleTranslator(source='auto', target=target_lang).translate(chunk)
+                    translated_chunks.append(translated_chunk)
+                except Exception as e:
+                    # Handle potential errors during translation of a chunk
+                    st.warning(f"Error translating chunk {i+1}: {str(e)}")
+                    # Add original chunk to maintain document structure
+                    translated_chunks.append(chunk)
+                
+                # Update progress bar
+                my_bar.progress((i+1)/len(chunks))
+            
+            # Join translated chunks with appropriate separators
+            translated_text = " ".join(translated_chunks)
+            
+        else:
+            # For shorter texts, translate directly
+            translated_text = GoogleTranslator(source='auto', target=target_lang).translate(text)
+            my_bar.progress(1.0)
+        
         my_bar.empty()
         return translated_text
+    
+    except Exception as e:
+        my_bar.empty()
+        st.error(f"Translation error: {str(e)}")
+        return text  # Return original text on error
 
 # Function to create a PDF in memory
 def create_pdf(text, title="Translated Document"):
@@ -304,20 +389,105 @@ def create_pdf(text, title="Translated Document"):
     pdf_output.seek(0)
     return pdf_output
 
-# Function to create Text-to-Speech audio
+# Enhanced text-to-speech function to handle large texts
 def text_to_speech(text, lang_code):
+    """
+    Converts text to speech with improved handling of large texts.
+    
+    Args:
+        text (str): Text to convert to speech
+        lang_code (str): Language code for TTS
+        
+    Returns:
+        BytesIO: Audio data in memory buffer
+    """
     try:
-        # Limit text length for TTS to avoid issues
-        if len(text) > 5000:
-            text = text[:5000] + "... (Text truncated for audio)"
+        # Check if text is empty or whitespace
+        if not text or text.isspace():
+            st.error("No text available for audio generation.")
+            return None
         
-        tts = gTTS(text=text, lang=lang_code[:2], slow=False)
-        audio_bytes = BytesIO()
-        tts.write_to_fp(audio_bytes)
-        audio_bytes.seek(0)
+        # Maximum length for gTTS (significantly smaller for audio generation)
+        MAX_TTS_LENGTH = 5000
         
-        # Return audio bytes
-        return audio_bytes
+        # If text is within limits, process normally
+        if len(text) <= MAX_TTS_LENGTH:
+            # Use only the first two characters of the language code (e.g., 'fr' from 'fr-FR')
+            lang_code_short = lang_code[:2] if lang_code and len(lang_code) >= 2 else 'en'
+            tts = gTTS(text=text, lang=lang_code_short, slow=False)
+            audio_bytes = BytesIO()
+            tts.write_to_fp(audio_bytes)
+            audio_bytes.seek(0)
+            return audio_bytes
+        
+        # For longer texts, create separate audio chunks and combine them
+        st.info("Text is too long for a single audio file. Generating audio in chunks...")
+        
+        # Split text intelligently at sentence boundaries
+        sentences = text.replace('. ', '.|').replace('! ', '!|').replace('? ', '?|').split('|')
+        
+        chunks = []
+        current_chunk = ""
+        
+        for sentence in sentences:
+            if len(current_chunk) + len(sentence) > MAX_TTS_LENGTH:
+                if current_chunk:  # Only add if not empty
+                    chunks.append(current_chunk)
+                current_chunk = sentence
+            else:
+                current_chunk += " " + sentence if current_chunk else sentence
+        
+        if current_chunk:
+            chunks.append(current_chunk)
+        
+        # Check if we have any valid chunks
+        if not chunks:
+            st.error("Could not create valid text chunks for audio generation.")
+            return None
+        
+        # Generate audio for each chunk
+        all_audio_data = BytesIO()
+        
+        progress_bar = st.progress(0)
+        for i, chunk in enumerate(chunks):
+            # Skip empty chunks
+            if not chunk or chunk.isspace():
+                continue
+                
+            # Update user on progress
+            progress_bar.progress((i) / len(chunks))
+            st.text(f"Generating audio chunk {i+1}/{len(chunks)}...")
+            
+            # Generate TTS for this chunk
+            try:
+                # Use only the first two characters of the language code
+                lang_code_short = lang_code[:2] if lang_code and len(lang_code) >= 2 else 'en'
+                tts = gTTS(text=chunk, lang=lang_code_short, slow=False)
+                chunk_audio = BytesIO()
+                tts.write_to_fp(chunk_audio)
+                chunk_audio.seek(0)
+                
+                # Append to our combined audio
+                all_audio_data.write(chunk_audio.getvalue())
+            except Exception as chunk_err:
+                st.warning(f"Error generating audio for chunk {i+1}: {str(chunk_err)}")
+                # Continue with next chunk
+            
+        # Final progress update
+        progress_bar.progress(1.0)
+        st.text("Audio generation complete!")
+        time.sleep(1)
+        progress_bar.empty()
+        
+        # Check if we have any audio data
+        if all_audio_data.tell() == 0:
+            st.error("No audio data was generated.")
+            return None
+            
+        # Reset position for reading
+        all_audio_data.seek(0)
+        return all_audio_data
+        
     except Exception as e:
         st.error(f"Error generating audio: {str(e)}")
         return None
@@ -357,6 +527,8 @@ if 'all_translated_pdfs' not in st.session_state:
     st.session_state.all_translated_pdfs = []
 if 'extracted_texts' not in st.session_state:
     st.session_state.extracted_texts = {}
+if 'audio_data' not in st.session_state:
+    st.session_state.audio_data = {}
 
 # Hide Streamlit branding
 hide_streamlit_style = """
@@ -450,34 +622,66 @@ with col2:
     st.markdown("</div>", unsafe_allow_html=True)
 
 # Function to translate all documents at once
+# Function to translate all documents at once with improved batch processing
 def translate_all_documents():
+    """
+    Translates all uploaded documents with proper progress tracking
+    and error handling to prevent document mixup.
+    """
     # Display a progress bar for the overall process
     overall_progress = st.progress(0)
     status_text = st.empty()
     
-    for i, (file_name, file_info) in enumerate(st.session_state.file_info.items()):
-        status_text.text(f"Translating {file_name}... ({i+1}/{len(st.session_state.file_info)})")
+    # Get the list of files to translate
+    files_to_translate = []
+    for file_name, file_info in st.session_state.file_info.items():
+        if not file_info.get("translated", False):
+            files_to_translate.append(file_name)
+    
+    if not files_to_translate:
+        status_text.text("All documents already translated!")
+        overall_progress.progress(1.0)
+        time.sleep(1)
+        status_text.empty()
+        overall_progress.empty()
+        return
+    
+    # Process each file one by one
+    for i, file_name in enumerate(files_to_translate):
+        status_text.text(f"Translating {file_name}... ({i+1}/{len(files_to_translate)})")
         
         # Get the extracted text
         extracted_text = st.session_state.extracted_texts.get(file_name, "")
         
         if extracted_text:
-            # Translate the text
-            translated_text = translate_text(extracted_text, selected_language_name)
-            
-            if translated_text.strip():
-                # Store translated text
-                st.session_state.translated_texts[file_name] = translated_text
+            try:
+                # Translate the text with improved chunking
+                translated_text = translate_text(extracted_text, selected_language_name)
                 
-                # Generate PDF
-                pdf_file = create_pdf(translated_text, f"Translated: {file_name}")
-                
-                if pdf_file:
-                    # Store for download all option
-                    st.session_state.all_translated_pdfs.append((file_name, pdf_file.getvalue()))
+                if translated_text.strip():
+                    # Store translated text
+                    st.session_state.translated_texts[file_name] = translated_text
+                    st.session_state.file_info[file_name]["translated"] = True
+                    
+                    # Generate PDF
+                    pdf_file = create_pdf(translated_text, f"Translated: {file_name}")
+                    
+                    if pdf_file:
+                        # Store for download all option
+                        pdf_exists = False
+                        for j, (existing_name, _) in enumerate(st.session_state.all_translated_pdfs):
+                            if existing_name == file_name:
+                                st.session_state.all_translated_pdfs[j] = (file_name, pdf_file.getvalue())
+                                pdf_exists = True
+                                break
+                        
+                        if not pdf_exists:
+                            st.session_state.all_translated_pdfs.append((file_name, pdf_file.getvalue()))
+            except Exception as e:
+                st.error(f"Error processing {file_name}: {str(e)}")
         
         # Update progress
-        overall_progress.progress((i + 1) / len(st.session_state.file_info))
+        overall_progress.progress((i + 1) / len(files_to_translate))
     
     # Mark as complete
     status_text.text("All translations complete!")
@@ -614,6 +818,7 @@ if uploaded_files:
                             mime="application/pdf"
                         )
                     
+                
                     # Add separate Text-to-Speech button
                     tts_button = st.button(
                         f"🔊 Generate Audio",
@@ -621,19 +826,25 @@ if uploaded_files:
                         help="Generate audio from translated text",
                         type="primary",
                     )
-                    
+
                     st.markdown('</div>', unsafe_allow_html=True)
-                    
+
+                    # Check if audio already exists in session state
+                    if file_name in st.session_state.audio_data:
+                        st.audio(st.session_state.audio_data[file_name], format="audio/mp3")
+                        st.markdown('<div class="success-message">Audio available</div>', unsafe_allow_html=True)
                     # If TTS button is clicked, generate audio
-                    if tts_button:
+                    elif tts_button:
                         with st.spinner("Generating audio..."):
                             audio_bytes = text_to_speech(translated_text, selected_language_name)
                             if audio_bytes:
+                                # Store in session state
+                                st.session_state.audio_data[file_name] = audio_bytes
                                 st.audio(audio_bytes, format="audio/mp3")
                                 st.markdown('<div class="success-message">Audio generated successfully!</div>', unsafe_allow_html=True)
                             else:
                                 st.markdown('<div class="error-message">Failed to generate audio.</div>', unsafe_allow_html=True)
-                
+   
                 # If not yet translated, show translate button
                 else:
                     # Translate button
@@ -645,6 +856,10 @@ if uploaded_files:
                             if not translated_text.strip():
                                 st.markdown('<div class="error-message">Translation failed! No text returned.</div>', unsafe_allow_html=True)
                             else:
+                                # Clear any existing audio when re-translating
+                                if file_name in st.session_state.audio_data:
+                                    del st.session_state.audio_data[file_name]
+                                
                                 # Store translated text
                                 st.session_state.translated_texts[file_name] = translated_text
                                 st.session_state.file_info[file_name]["translated"] = True
