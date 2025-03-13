@@ -8,6 +8,7 @@ import zipfile
 import base64
 from gtts import gTTS
 import time
+import os
 
 # Set page config for a wider layout and customize theme
 st.set_page_config(
@@ -363,31 +364,23 @@ def translate_text(text, target_lang):
 
 # Function to create a PDF in memory
 def create_pdf(text, title="Translated Document"):
-    if not text.strip():
-        return None
-
-    pdf = FPDF()
-    pdf.add_page()
+    from reportlab.lib.pagesizes import letter
+    from reportlab.platypus import SimpleDocTemplate, Paragraph
+    from reportlab.lib.styles import getSampleStyleSheet
     
-    # Add a header
-    pdf.set_font("Arial", 'B', 16)
-    pdf.cell(0, 10, title, 0, 1, 'C')
-    pdf.line(10, 25, 200, 25)
-    pdf.ln(10)
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    styles = getSampleStyleSheet()
     
-    # Add content
-    pdf.set_font("Arial", size=11)
-    pdf.multi_cell(0, 10, text)
+    # Create the content
+    content = []
+    content.append(Paragraph(title, styles['Title']))
+    content.append(Paragraph(text, styles['Normal']))
     
-    # Add footer with page numbers
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.alias_nb_pages()
-    
-    # Output the PDF to a BytesIO stream
-    pdf_output = BytesIO()
-    pdf.output(pdf_output)
-    pdf_output.seek(0)
-    return pdf_output
+    # Build the PDF
+    doc.build(content)
+    buffer.seek(0)
+    return buffer
 
 # Enhanced text-to-speech function to handle large texts
 def text_to_speech(text, lang_code):
@@ -572,6 +565,25 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
+    st.markdown('<div class="custom-divider"></div>', unsafe_allow_html=True)
+    reset_placeholder = st.empty()
+    
+    # Add reset button
+    with reset_placeholder.container():
+        st.markdown('<div class="dark-container">', unsafe_allow_html=True)
+        st.markdown("### Reset Translations")
+        
+        if st.button("🔄 Reset All Translations", key="reset_btn", use_container_width=True):
+            # Clear all translations and related data
+            st.session_state.translated_texts = {}
+            st.session_state.file_info = {}
+            st.session_state.all_translated_pdfs = []
+            st.session_state.audio_data = {}
+            # Keep extracted_texts to avoid re-extraction
+            st.rerun()
+                
+        st.markdown('</div>', unsafe_allow_html=True)
+
 # Main content area
 st.markdown('<h1 class="main-header">Document Translator Pro</h1>', unsafe_allow_html=True)
 st.markdown('<p class="sub-header">Translate your documents with ease and precision</p>', unsafe_allow_html=True)
@@ -635,7 +647,7 @@ def translate_all_documents():
     # Get the list of files to translate
     files_to_translate = []
     for file_name, file_info in st.session_state.file_info.items():
-        if not file_info.get("translated", False):
+        if selected_language_name not in file_info.get("translated_languages", []):
             files_to_translate.append(file_name)
     
     if not files_to_translate:
@@ -660,8 +672,11 @@ def translate_all_documents():
                 
                 if translated_text.strip():
                     # Store translated text
-                    st.session_state.translated_texts[file_name] = translated_text
-                    st.session_state.file_info[file_name]["translated"] = True
+                    lang_file_key = f"{selected_language_name}_{file_name}"
+                    st.session_state.translated_texts[lang_file_key] = translated_text
+                    st.session_state.file_info[file_name]["translated_languages"] = st.session_state.file_info[file_name].get("translated_languages", [])
+                    if selected_language_name not in st.session_state.file_info[file_name]["translated_languages"]:
+                        st.session_state.file_info[file_name]["translated_languages"].append(selected_language_name)
                     
                     # Generate PDF
                     pdf_file = create_pdf(translated_text, f"Translated: {file_name}")
@@ -720,7 +735,8 @@ if uploaded_files:
     with stats_placeholder.container():
         st.markdown('<div class="dark-container">', unsafe_allow_html=True)
         st.metric("Files Uploaded", len(uploaded_files))
-        translated_count = sum(1 for f in st.session_state.file_info.values() if f.get("translated", False))
+        translated_count = sum(1 for f in st.session_state.file_info.values() 
+                       if selected_language_name in f.get("translated_languages", []))
         st.metric("Files Translated", f"{translated_count}/{len(uploaded_files)}")
         st.metric("Target Language", language_map.get(selected_language_name, selected_language_name))
         st.markdown('</div>', unsafe_allow_html=True)
@@ -781,8 +797,10 @@ if uploaded_files:
                     )
                 
                 # If already translated, show the translation
-                if file_name in st.session_state.translated_texts:
-                    translated_text = st.session_state.translated_texts[file_name]
+                lang_file_key = f"{selected_language_name}_{file_name}"
+                if lang_file_key in st.session_state.translated_texts:
+                    lang_file_key = f"{selected_language_name}_{file_name}"
+                    translated_text = st.session_state.translated_texts[lang_file_key]
                     
                     # Mark as translated in the file info
                     st.session_state.file_info[file_name]["translated"] = True
@@ -800,8 +818,9 @@ if uploaded_files:
                     
                     # Find the PDF in already generated PDFs
                     pdf_data = None
+                    lang_file_key = f"{selected_language_name}_{file_name}"
                     for name, data in st.session_state.all_translated_pdfs:
-                        if name == file_name:
+                        if name == lang_file_key:
                             pdf_data = data
                             break
                     
@@ -830,7 +849,7 @@ if uploaded_files:
                     st.markdown('</div>', unsafe_allow_html=True)
 
                     # Check if audio already exists in session state
-                    if file_name in st.session_state.audio_data:
+                    if f"{selected_language_name}_{file_name}" in st.session_state.audio_data:
                         st.audio(st.session_state.audio_data[file_name], format="audio/mp3")
                         st.markdown('<div class="success-message">Audio available</div>', unsafe_allow_html=True)
                     # If TTS button is clicked, generate audio
@@ -861,8 +880,11 @@ if uploaded_files:
                                     del st.session_state.audio_data[file_name]
                                 
                                 # Store translated text
-                                st.session_state.translated_texts[file_name] = translated_text
-                                st.session_state.file_info[file_name]["translated"] = True
+                                lang_file_key = f"{selected_language_name}_{file_name}"
+                                st.session_state.translated_texts[lang_file_key] = translated_text
+                                st.session_state.file_info[file_name]["translated_languages"] = st.session_state.file_info[file_name].get("translated_languages", [])
+                                if selected_language_name not in st.session_state.file_info[file_name]["translated_languages"]:
+                                    st.session_state.file_info[file_name]["translated_languages"].append(selected_language_name)
                                 
                                 # Generate PDF
                                 pdf_file = create_pdf(
@@ -872,7 +894,7 @@ if uploaded_files:
                                 
                                 if pdf_file:
                                     # Store for download all option
-                                    st.session_state.all_translated_pdfs.append((file_name, pdf_file.getvalue()))
+                                    st.session_state.all_translated_pdfs.append((f"{selected_language_name}_{file_name}", pdf_file.getvalue()))
                                 
                                 # Force refresh to show the translation
                                 st.rerun()
